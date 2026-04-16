@@ -2,7 +2,7 @@ import uuid
 import enum
 from sqlalchemy import (
     Column, String, Boolean, DateTime, Integer,
-    ForeignKey, Enum, BigInteger, func, text
+    ForeignKey, Enum, BigInteger, func, text, Index
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
@@ -11,10 +11,11 @@ from app.db.base import Base
 
 # ---------------- ENUMS ---------------- #
 
-class UploadStatus(str, enum.Enum):
-    PENDING = "pending"
-    UPLOADING = "uploading"
+class DocumentStatus(str, enum.Enum):
+    PENDING_UPLOAD = "pending_upload"
     UPLOADED = "uploaded"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
     FAILED = "failed"
 
 
@@ -51,7 +52,11 @@ class User(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
     # Relationships
-    tasks = relationship("Task", back_populates="user")
+    tasks = relationship(
+        "Task",
+        back_populates="user",
+        cascade="all, delete-orphan"
+    )
 
 
 # ---------------- TASK ---------------- #
@@ -61,10 +66,13 @@ class Task(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
+    name = Column(String, nullable=False)
+
     user_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("users.id"),
-        nullable=False
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True
     )
 
     total_files = Column(Integer, default=0)
@@ -74,17 +82,23 @@ class Task(Base):
     status = Column(
         Enum(TaskStatus, name="task_status"),
         default=TaskStatus.PENDING,
-        nullable=False
+        nullable=False,
+        index=True
     )
 
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
-    completed_at = Column(DateTime, nullable=True)  # only set when done
+    completed_at = Column(DateTime, nullable=True)
 
     # Relationships
     user = relationship("User", back_populates="tasks")
-    pdfs = relationship("PDF", back_populates="task")
+
+    pdfs = relationship(
+        "PDF",
+        back_populates="task",
+        cascade="all, delete-orphan"
+    )
 
 
 # ---------------- PDF ---------------- #
@@ -96,20 +110,21 @@ class PDF(Base):
 
     task_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("tasks.id"),
-        nullable=False
+        ForeignKey("tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True
     )
 
     file_name = Column(String, nullable=False)
     file_size = Column(BigInteger)
 
     s3_key = Column(String, nullable=False)
-    s3_url = Column(String)
 
     status = Column(
-        Enum(UploadStatus, name="upload_status"),
-        default=UploadStatus.PENDING,
-        nullable=False
+        Enum(DocumentStatus, name="document_status"),
+        default=DocumentStatus.PENDING_UPLOAD,
+        nullable=False,
+        index=True
     )
 
     retry_count = Column(Integer, default=0)
@@ -122,3 +137,7 @@ class PDF(Base):
 
     # Relationships
     task = relationship("Task", back_populates="pdfs")
+
+    __table_args__ = (
+        Index("idx_task_status", "task_id", "status"),
+    )
