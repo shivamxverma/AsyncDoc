@@ -18,4 +18,4 @@ redis
 celery
 boto3
 python-magic
-PyPDF2
+pypdf
