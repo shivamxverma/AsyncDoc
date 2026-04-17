@@ -18,10 +18,8 @@ export default function Dashboard() {
     }
   }, [router]);
 
-  const { jobs, setJobs } = useJobStore((state) => ({
-    jobs: state.jobs,
-    setJobs: state.setJobs
-  }));
+  const jobs = useJobStore((state) => state.jobs);
+  const setJobs = useJobStore((state) => state.setJobs);
 
   useEffect(() => {
     const fetchTasks = async () => {
