@@ -10,6 +10,7 @@ starlette
 itsdangerous
 pydantic-settings
 sqlalchemy
+sqlmodel
 psycopg2-binary
 alembic
 python-dotenv
