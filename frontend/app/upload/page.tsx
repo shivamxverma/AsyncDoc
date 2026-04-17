@@ -20,7 +20,7 @@ export default function UploadPage() {
 
   const addJob = useJobStore((state) => state.addJob);
 
-  const handleUpload = async (file: File) => {
+  const handleUpload = async (files: File[]) => {
     setIsUploading(true);
     
     try {
@@ -30,80 +30,100 @@ export default function UploadPage() {
         return;
       }
 
-      // 1. Initiate the upload and get the pre-signed S3 URL
-      const response = await fetch("http://localhost:8000/api/v1/task/upload/initiate", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`
-        },
-        body: JSON.stringify({
-          name: file.name,
-          files: [
-            {
-              filename: file.name,
-              content_type: file.type || "application/pdf"
-            }
-          ]
-        })
+      const uploadPromises = files.map(async (file) => {
+        try {
+          // 1. Initiate the upload and get the pre-signed S3 URL
+          const response = await fetch("http://localhost:8000/api/v1/task/upload/initiate", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${token}`
+            },
+            body: JSON.stringify({
+              name: file.name,
+              files: [
+                {
+                  filename: file.name,
+                  content_type: file.type || "application/pdf"
+                }
+              ]
+            })
+          });
+
+          if (!response.ok) {
+            throw new Error(`Failed to initiate upload for ${file.name}: ${response.statusText}`);
+          }
+
+          const data = await response.json();
+          const jobId = data.task_id;
+          const documentId = data.documents[0].document_id;
+          const uploadUrl = data.documents[0].upload_url;
+
+          // 2. Upload the file to S3 using the pre-signed URL
+          const uploadResponse = await fetch(uploadUrl, {
+            method: "PUT",
+            headers: {
+              "Content-Type": file.type || "application/pdf",
+            },
+            body: file,
+          });
+
+          if (!uploadResponse.ok) {
+            throw new Error(`Failed to upload ${file.name} to S3`);
+          }
+
+          // 3. Notify the backend that the upload is complete
+          const completeResponse = await fetch("http://localhost:8000/api/v1/task/upload/complete", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${token}`
+            },
+            body: JSON.stringify({
+              task_id: jobId,
+              document_ids: [documentId]
+            })
+          });
+
+          if (!completeResponse.ok) {
+            throw new Error(`Failed to complete upload for ${file.name}`);
+          }
+
+          const now = new Date().toISOString();
+          
+          addJob({
+            id: jobId,
+            fileName: file.name,
+            status: "queued",
+            progress: 0,
+            currentStep: "queued",
+            steps: STEP_ORDER.map(name => ({ name, status: "pending" as const })),
+            createdAt: now,
+            updatedAt: now,
+          });
+
+          return { success: true, fileName: file.name };
+        } catch (err) {
+          console.error(`Error uploading ${file.name}:`, err);
+          return { success: false, fileName: file.name, error: err };
+        }
       });
 
-      if (!response.ok) {
-        throw new Error(`Failed to initiate upload: ${response.statusText}`);
+      const results = await Promise.all(uploadPromises);
+      const failed = results.filter(r => !r.success);
+
+      if (failed.length > 0) {
+        console.error(`${failed.length} uploads failed`, failed);
+        // We still redirect to dashboard if some succeeded, or stay here if all failed
+        if (failed.length === files.length) {
+          setIsUploading(false);
+          return;
+        }
       }
-
-      const data = await response.json();
-      
-      const jobId = data.task_id;
-      const documentId = data.documents[0].document_id;
-      const uploadUrl = data.documents[0].upload_url;
-
-      // 2. Upload the file to S3 using the pre-signed URL
-      const uploadResponse = await fetch(uploadUrl, {
-        method: "PUT",
-        headers: {
-          "Content-Type": file.type || "application/pdf",
-        },
-        body: file,
-      });
-
-      if (!uploadResponse.ok) {
-        throw new Error(`Failed to upload to S3: ${uploadResponse.statusText}`);
-      }
-
-      // 3. Notify the backend that the upload is complete
-      const completeResponse = await fetch("http://localhost:8000/api/v1/task/upload/complete", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`
-        },
-        body: JSON.stringify({
-          task_id: jobId,
-          document_ids: [documentId]
-        })
-      });
-
-      if (!completeResponse.ok) {
-        throw new Error(`Failed to complete upload: ${completeResponse.statusText}`);
-      }
-
-      const now = new Date().toISOString();
-      
-      addJob({
-        id: jobId,
-        fileName: file.name,
-        status: "queued",
-        progress: 0,
-        currentStep: "queued",
-        steps: STEP_ORDER.map(name => ({ name, status: "pending" as const })),
-        createdAt: now,
-        updatedAt: now,
-      });
 
       router.push("/dashboard");
     } catch (error) {
-      console.error("Upload failed", error);
+      console.error("Batch upload failed", error);
       setIsUploading(false);
     }
   };

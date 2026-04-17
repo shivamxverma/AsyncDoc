@@ -18,7 +18,45 @@ export default function Dashboard() {
     }
   }, [router]);
 
-  const jobs = useJobStore((state) => state.jobs);
+  const { jobs, setJobs } = useJobStore((state) => ({
+    jobs: state.jobs,
+    setJobs: state.setJobs
+  }));
+
+  useEffect(() => {
+    const fetchTasks = async () => {
+      const token = localStorage.getItem("auth_token");
+      if (!token) return;
+
+      try {
+        const response = await fetch("http://localhost:8000/api/v1/task", {
+          headers: {
+            "Authorization": `Bearer ${token}`
+          }
+        });
+        if (!response.ok) throw new Error("Failed to fetch tasks");
+        const data = await response.json();
+        
+        // Map backend tasks to frontend Job format
+        const mappedJobs = data.map((t: any) => ({
+          id: t.id,
+          fileName: t.name,
+          status: t.status.toLowerCase(),
+          progress: t.status === "completed" ? 100 : (t.processed_files / t.total_files * 100) || 0,
+          currentStep: t.status === "completed" ? "completed" : "processing",
+          steps: [], // Optional: fetch steps if needed
+          createdAt: t.created_at,
+          updatedAt: t.created_at
+        }));
+        
+        setJobs(mappedJobs);
+      } catch (error) {
+        console.error("Error fetching tasks:", error);
+      }
+    };
+
+    fetchTasks();
+  }, [setJobs]);
 
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<JobStatus | "all">("all");
@@ -35,15 +73,6 @@ export default function Dashboard() {
     }
     return result.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }, [jobsList, search, statusFilter]);
-
-  // For testing UI if empty
-  // Uncomment to inject mock data if needed:
-  /*
-  useEffect(() => {
-    const mockDb = require('../../lib/mockData').MOCK_JOBS;
-    useJobStore.getState().setJobs(mockDb);
-  }, []);
-  */
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
@@ -122,9 +151,18 @@ export default function Dashboard() {
                 <JobRow
                   key={job.id}
                   job={job}
-                  onRetry={() => {
-                    // In a real app this would call API
-                    console.log("retry", job.id);
+                  onRetry={async () => {
+                    const token = localStorage.getItem("auth_token");
+                    try {
+                      const res = await fetch(`http://localhost:8000/api/v1/task/${job.id}/retry`, {
+                        method: "POST",
+                        headers: { "Authorization": `Bearer ${token}` }
+                      });
+                      if (!res.ok) throw new Error("Retry failed");
+                      alert("Retry initiated");
+                    } catch (e) {
+                      alert("Failed to retry task");
+                    }
                   }}
                 />
               ))}

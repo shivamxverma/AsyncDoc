@@ -3,7 +3,7 @@
 export default function LoginPage() {
   const handleGoogleLogin = () => {
     // Redirect to backend login endpoint
-    window.location.href = "http://localhost:8000/api/v1/google/login";
+    window.location.href = "http://localhost:8000/api/v1/auth/google/login";
   };
 
   return (

@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 import uuid
 from app.db.session import get_session
 from app.models import Task, PDF, DocumentStatus, TaskStatus
-from app.api.task.schemas import CreateTask , FileMeta ,UpdatePDFstatus 
+from app.api.task.schemas import CreateTask , FileMeta ,UpdatePDFstatus, DocumentResultUpdate 
 from typing import List
 from app.db.base import Base
 from app.config.aws import get_s3_client
@@ -39,6 +39,9 @@ def initiate_upload(
 ):
     if not data.files:
         raise HTTPException(status_code=400, detail="No files provided")
+
+    if len(data.files) > 5:
+        raise HTTPException(status_code=400, detail="Maximum 5 files allowed per upload session")
 
     for file in data.files:
         if not file.filename.lower().endswith(".pdf"):
@@ -195,23 +198,198 @@ def get_task(
                 "file_name": pdf.file_name,
                 "status": pdf.status,
                 "result": pdf.result,
+                "is_finalized": pdf.is_finalized,
                 "created_at": pdf.created_at
             }
             for pdf in pdfs
         ]
     }
 
-@router.put("/{task_id}/result")
-def update_task_result(task_id: uuid.UUID, data: dict, db: Session = Depends(get_session)):
-    task = db.get(Task, task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+@router.get("")
+def list_tasks(
+    search: str | None = None,
+    status: TaskStatus | None = None,
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    query = db.query(Task).filter(Task.user_id == current_user.id)
+    
+    if search:
+        query = query.filter(Task.name.ilike(f"%{search}%"))
+        
+    if status:
+        query = query.filter(Task.status == status)
+        
+    tasks = query.order_by(Task.created_at.desc()).all()
+    
+    return [
+        {
+            "id": str(task.id),
+            "name": task.name,
+            "status": task.status,
+            "total_files": task.total_files,
+            "processed_files": task.processed_files,
+            "failed_files": task.failed_files,
+            "created_at": task.created_at,
+        }
+        for task in tasks
+    ]
 
-    pdf = db.query(PDF).filter(PDF.task_id == task_id).first()
+@router.put("/document/{document_id}/result")
+def update_document_result(
+    document_id: uuid.UUID, 
+    data: DocumentResultUpdate, 
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    pdf = db.get(PDF, document_id)
     if not pdf:
-        raise HTTPException(status_code=404, detail="No documents found for this task")
+        raise HTTPException(status_code=404, detail="Document not found")
+        
+    task = db.get(Task, pdf.task_id)
+    if not task or task.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
 
-    pdf.result = data
+    if pdf.is_finalized:
+        raise HTTPException(status_code=400, detail="Document is finalized and cannot be edited")
+
+    # Update result JSON
+    current_result = pdf.result or {}
+    if data.title is not None: current_result["title"] = data.title
+    if data.category is not None: current_result["category"] = data.category
+    if data.summary is not None: current_result["summary"] = data.summary
+    if data.extracted_keywords is not None: current_result["extracted_keywords"] = data.extracted_keywords
+    
+    pdf.result = current_result
     db.commit()
     
-    return {"message": "Document result updated successfully"}
+    return {"message": "Document result updated successfully", "result": pdf.result}
+
+@router.post("/document/{document_id}/finalize")
+def finalize_document(
+    document_id: uuid.UUID,
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    pdf = db.get(PDF, document_id)
+    if not pdf:
+        raise HTTPException(status_code=404, detail="Document not found")
+        
+    task = db.get(Task, pdf.task_id)
+    if not task or task.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    pdf.is_finalized = True
+    db.commit()
+    return {"message": "Document finalized"}
+
+@router.post("/document/{document_id}/retry")
+def retry_document(
+    document_id: uuid.UUID,
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    pdf = db.get(PDF, document_id)
+    if not pdf:
+        raise HTTPException(status_code=404, detail="Document not found")
+        
+    task = db.get(Task, pdf.task_id)
+    if not task or task.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    pdf.status = DocumentStatus.PROCESSING
+    pdf.retry_count += 1
+    db.commit()
+    
+    process_pdf.delay(str(pdf.id))
+    return {"message": "Retry initiated"}
+
+@router.post("/{task_id}/retry")
+def retry_task(
+    task_id: uuid.UUID,
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    task = db.get(Task, task_id)
+    if not task or task.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    failed_pdfs = db.query(PDF).filter(
+        PDF.task_id == task_id,
+        PDF.status == DocumentStatus.FAILED
+    ).all()
+
+    for pdf in failed_pdfs:
+        pdf.status = DocumentStatus.PROCESSING
+        pdf.retry_count += 1
+        db.commit()
+        process_pdf.delay(str(pdf.id))
+        
+    task.status = TaskStatus.PROCESSING
+    db.commit()
+
+    return {"message": f"Retry initiated for {len(failed_pdfs)} documents"}
+
+@router.get("/{task_id}/export/json")
+def export_json(
+    task_id: uuid.UUID,
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    task = db.get(Task, task_id)
+    if not task or task.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+        
+    pdfs = db.query(PDF).filter(PDF.task_id == task_id).all()
+    
+    export_data = [
+        {
+            "file_name": pdf.file_name,
+            "status": pdf.status,
+            "result": pdf.result,
+            "is_finalized": pdf.is_finalized
+        }
+        for pdf in pdfs
+    ]
+    
+    from fastapi.responses import JSONResponse
+    return JSONResponse(content=export_data, headers={"Content-Disposition": f"attachment; filename=task_{task_id}.json"})
+
+@router.get("/{task_id}/export/csv")
+def export_csv(
+    task_id: uuid.UUID,
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    task = db.get(Task, task_id)
+    if not task or task.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+        
+    pdfs = db.query(PDF).filter(PDF.task_id == task_id).all()
+    
+    import csv
+    import io
+    from fastapi.responses import StreamingResponse
+    
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["File Name", "Status", "Title", "Category", "Summary", "Keywords", "Finalized"])
+    
+    for pdf in pdfs:
+        res = pdf.result or {}
+        writer.writerow([
+            pdf.file_name,
+            pdf.status,
+            res.get("title", ""),
+            res.get("category", ""),
+            res.get("summary", ""),
+            ", ".join(res.get("extracted_keywords", [])),
+            pdf.is_finalized
+        ])
+    
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=task_{task_id}.csv"}
+    )

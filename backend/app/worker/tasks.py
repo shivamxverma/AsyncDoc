@@ -43,6 +43,12 @@ def process_pdf(document_id: str):
             "event": "parsing_started",
             "status": "processing"
         })
+        time.sleep(1) # Simulate work
+        publish_progress(channel, {
+            "job_id": str(pdf.task_id),
+            "event": "parsing_completed",
+            "status": "processing"
+        })
 
         publish_progress(channel, {
             "job_id": str(pdf.task_id),
@@ -51,10 +57,15 @@ def process_pdf(document_id: str):
         })
 
         extracted_data = extract_pdf_data(file_content, pdf.file_name)
+        
+        publish_progress(channel, {
+            "job_id": str(pdf.task_id),
+            "event": "extraction_completed",
+            "status": "processing"
+        })
 
         pdf.result = extracted_data  
         pdf.status = DocumentStatus.COMPLETED
-
         db.commit()
 
         completed_pdfs = db.query(PDF).filter(PDF.task_id == pdf.task_id, PDF.status == DocumentStatus.COMPLETED).count()

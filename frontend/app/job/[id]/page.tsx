@@ -16,6 +16,8 @@ export default function JobDetail({ params }: { params: Promise<{ id: string }> 
   const { id } = use(params);
   const job = useJobStore((state) => state.jobs[id]);
   
+  const [documentId, setDocumentId] = useState<string | null>(null);
+  const [isFinalized, setIsFinalized] = useState(false);
   const [data, setData] = useState<ExtractedData>({
     title: "",
     category: "",
@@ -24,24 +26,38 @@ export default function JobDetail({ params }: { params: Promise<{ id: string }> 
   });
 
   useEffect(() => {
-    if (job?.status === "completed" && !data.title) {
-      if (job.result) {
-        setData({
-          title: job.result.title || job.fileName.replace(".pdf", ""),
-          category: job.result.category || "",
-          summary: job.result.summary || "",
-          keywords: job.result.extracted_keywords || [],
+    const fetchJobDetails = async () => {
+      const token = localStorage.getItem("auth_token");
+      if (!token) return;
+
+      try {
+        const response = await fetch(`http://localhost:8000/api/v1/task/${id}`, {
+          headers: { "Authorization": `Bearer ${token}` }
         });
-      } else {
-        setData({
-          title: job.fileName.replace(".pdf", ""),
-          category: "Unknown",
-          summary: "Details are still being fetched or weren't returned by the extraction step.",
-          keywords: ["pending"],
-        });
+        if (!response.ok) throw new Error("Failed to fetch job");
+        const jobData = await response.json();
+        
+        // Find the first document (assuming 1 doc per task for now)
+        if (jobData.documents && jobData.documents.length > 0) {
+          const doc = jobData.documents[0];
+          setDocumentId(doc.id);
+          setIsFinalized(doc.is_finalized);
+          if (doc.result) {
+            setData({
+              title: doc.result.title || doc.file_name.replace(".pdf", ""),
+              category: doc.result.category || "",
+              summary: doc.result.summary || "",
+              keywords: doc.result.extracted_keywords || [],
+            });
+          }
+        }
+      } catch (error) {
+        console.error("Error fetching job details:", error);
       }
-    }
-  }, [job?.status, job?.fileName, data.title, job?.result]);
+    };
+
+    fetchJobDetails();
+  }, [id]);
 
   if (!job) {
     return (
@@ -60,39 +76,73 @@ export default function JobDetail({ params }: { params: Promise<{ id: string }> 
   }
 
   const handleUpdateField = (field: keyof ExtractedData, value: string | string[]) => {
+    if (isFinalized) return;
     setData(prev => ({ ...prev, [field]: value }));
   };
 
-  const saveToServer = async (isFinalize: boolean) => {
+  const saveToServer = async (finalize: boolean) => {
+    if (!documentId) return;
     try {
+      const token = localStorage.getItem("auth_token");
+      
+      // 1. Update result
       const payload = {
-        ...(job.result || {}),
         title: data.title,
         category: data.category,
         summary: data.summary,
-        // Match the backend property name
         extracted_keywords: data.keywords 
       };
 
-      const response = await fetch(`http://localhost:8000/api/v1/task/${id}/result`, {
+      const updateRes = await fetch(`http://localhost:8000/api/v1/task/document/${documentId}/result`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: { 
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
         body: JSON.stringify(payload)
       });
 
-      if (!response.ok) throw new Error("Failed to save");
+      if (!updateRes.ok) throw new Error("Failed to update");
 
-      toast.success(isFinalize ? "Document finalized and locked" : "Changes saved successfully");
+      // 2. Finalize if requested
+      if (finalize) {
+        const finalizeRes = await fetch(`http://localhost:8000/api/v1/task/document/${documentId}/finalize`, {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${token}` }
+        });
+        if (!finalizeRes.ok) throw new Error("Failed to finalize");
+        setIsFinalized(true);
+      }
+
+      toast.success(finalize ? "Document finalized and locked" : "Changes saved successfully");
     } catch (error) {
-      toast.error("Failed to update document result.");
+      toast.error("Failed to update document.");
     }
   };
 
   const handleSave = () => saveToServer(false);
   const handleFinalize = () => saveToServer(true);
 
-  const handleExport = (format: "json" | "csv") => {
-    toast.info(`Exporting as ${format.toUpperCase()}...`);
+  const handleExport = async (format: "json" | "csv") => {
+    try {
+      const token = localStorage.getItem("auth_token");
+      const response = await fetch(`http://localhost:8000/api/v1/task/${id}/export/${format}`, {
+        headers: { "Authorization": `Bearer ${token}` }
+      });
+      if (!response.ok) throw new Error("Export failed");
+      
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `export_${id}.${format}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      toast.success(`Exported as ${format.toUpperCase()}`);
+    } catch (error) {
+      toast.error("Failed to export data");
+    }
   };
 
   return (

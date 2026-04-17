@@ -1,5 +1,5 @@
-from pydantic import BaseModel, Field  # pyright: ignore[reportMissingImports]
-from typing import List
+from pydantic import BaseModel, Field
+from typing import List, Optional
 from uuid import UUID
 
 class FileMeta(BaseModel):
@@ -7,10 +7,15 @@ class FileMeta(BaseModel):
     content_type: str
 
 class CreateTask(BaseModel):
-    # user_id: str
     name: str
     files: List[FileMeta]
 
 class UpdatePDFstatus(BaseModel):
     task_id: UUID
-    document_ids : List[UUID] = Field(..., min_length=1)
+    document_ids: List[UUID] = Field(..., min_length=1)
+
+class DocumentResultUpdate(BaseModel):
+    title: Optional[str] = None
+    category: Optional[str] = None
+    summary: Optional[str] = None
+    extracted_keywords: Optional[List[str]] = None
