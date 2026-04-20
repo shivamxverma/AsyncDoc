@@ -1,4 +1,4 @@
-# Async Document Processing Workflow System
+# Storix ---> Async Document Processing Workflow System
 
 A full-stack asynchronous document processing application built with FastAPI, Next.js, Celery, Redis, and PostgreSQL.
 
